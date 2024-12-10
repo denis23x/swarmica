@@ -2,8 +2,10 @@ import { Article } from "./types/article.ts";
 import { Instance, Locale } from "./types/instance.ts";
 import { Category } from "./types/category.ts";
 import { ChangeEvent, useEffect, useState } from "react";
-import { Pagination } from "./types/pagination.ts";
 import { useDebounce } from "use-debounce";
+import { getCategories, getInstance, searchArticles } from "./services/api.ts";
+import { marked } from "marked";
+import { getLS, setLS } from "./services/localStorage.ts";
 
 function App() {
 	const [categories, setCategories] = useState<Category[]>([]);
@@ -12,38 +14,23 @@ function App() {
 	const [loading, setLoading] = useState<boolean>(true);
 
 	const [activeCategoriesId, setActiveCategoriesId] = useState<number[]>([]);
-	const [activeLocale, setActiveLocale] = useState<Locale>("ru");
+	const [activeLocale, setActiveLocale] = useState<Locale>("en");
 
 	const [search, setSearch] = useState<string>("");
 	const [searchDebounced] = useDebounce<string>(search, 1000);
 
+	const [visitedArticlesId, setVisitedArticlesId] = useState<number[]>(getLS("visitedArticlesId") || []);
+
 	useEffect(() => {
-		const getLocales = async (): Promise<Locale[]> => {
-			return fetch("/api/instance/")
-				.then(r => r.json())
-				.then((i: Instance) => {
-					setActiveLocale(i.default_locale);
-
-					return i.locales;
-				});
-		};
-
-		const getCategories = async (): Promise<Category[]> => {
-			return fetch("/api/categories/")
-				.then(r => r.json())
-				.then((a: Pagination<Category>) => a.results);
-		};
-
 		const fetchData = async () => {
 			try {
-				const [xLocales, xCategories]: [Locale[], Category[]] = await Promise.all([getLocales(), getCategories()]);
+				const [xInstance, xCategories]: [Instance, Category[]] = await Promise.all([getInstance(), getCategories()]);
 
-				setLocales(xLocales);
+				setActiveLocale(xInstance.default_locale);
+				setLocales(xInstance.locales);
 				setCategories(xCategories);
 			} catch (error: unknown) {
-				// TODO: toast, alert, snack, ..etc
-
-				console.error(error);
+				handleFetchError(error, "Failed to load data");
 			} finally {
 				setLoading(false);
 			}
@@ -53,40 +40,33 @@ function App() {
 	}, []);
 
 	useEffect(() => {
-		if (searchDebounced) {
-			const getArticles = async (): Promise<Article[]> => {
-				const queryParams: string = new URLSearchParams({
-					categories: activeCategoriesId.join(","),
-					locale: activeLocale,
-					search: searchDebounced,
-				}).toString();
+		const fetchData = async () => {
+			if (!searchDebounced) {
+				setArticles([]);
+				return;
+			}
 
-				return fetch("/api/search/articles/?" + queryParams)
-					.then(r => r.json())
-					.then((i: Pagination<Article>) => i.results);
-			};
+			setLoading(true);
+			try {
+				const articleList: Article[] = await searchArticles(activeLocale, activeCategoriesId, searchDebounced);
 
-			const fetchData = async () => {
-				setLoading(true);
+				setArticles(articleList);
+			} catch (error: unknown) {
+				handleFetchError(error, "Failed to fetch articles");
+			} finally {
+				setLoading(false);
+			}
+		};
 
-				try {
-					const xArticles: Article[] = await getArticles();
-
-					setArticles(xArticles);
-				} catch (error: unknown) {
-					// TODO: toast, alert, snack, ..etc
-
-					console.error(error);
-				} finally {
-					setLoading(false);
-				}
-			};
-
-			fetchData().then(() => console.debug("Articles list has been received"));
-		} else {
-			setArticles([]);
-		}
+		fetchData().then(() => console.debug("The articles has been received"));
 	}, [searchDebounced, activeLocale, activeCategoriesId]);
+
+	const handleFetchError = (error: unknown, message: string) => {
+		// TODO: toast, alert, snack, ..etc
+
+		console.debug(message);
+		console.error(error);
+	};
 
 	const handleActiveCategoriesId = (newId: number) => {
 		setActiveCategoriesId((activeCategoriesId: number[]) => {
@@ -98,10 +78,24 @@ function App() {
 		});
 	};
 
+	const handleLinkClick = (event: React.MouseEvent<HTMLAnchorElement, MouseEvent>, articleId: number) => {
+		event.preventDefault();
+
+		setVisitedArticlesId((visitedArticlesId: number[]) => {
+			const newVisitedArticlesId: number[] = visitedArticlesId.concat(articleId);
+
+			setLS("visitedArticlesId", newVisitedArticlesId);
+
+			return newVisitedArticlesId;
+		});
+
+		window.open(event.currentTarget.href, "_blank");
+	};
+
 	return (
-		<main className={"grid gap-4 max-w-[1440px] mx-auto p-4"}>
-			<header className={"grid gap-4 border border-zinc-200 rounded-lg p-4"}>
-				<h1 className={"text-2xl font-light uppercase"}>Swarmica</h1>
+		<main className={"grid gap-4 max-w-[1280px] mx-auto p-4"}>
+			<header className={"grid gap-4 border border-zinc-200 rounded-lg bg-white p-4"}>
+				<h1 className={"text-2xl font-light"}>Search</h1>
 				<input
 					className={"border border-zinc-200 rounded p-2"}
 					type={"search"}
@@ -110,16 +104,21 @@ function App() {
 					disabled={loading}
 					onChange={(e: ChangeEvent<HTMLInputElement>) => setSearch(e.target.value)}
 				/>
-				<p className={"text-sm opacity-50"}>Example: How is hex radar diagram in a scorecard is built?</p>
+				<p className={"text-sm opacity-50"}>
+					Example:{" "}
+					<span className={"underline cursor-pointer"} onClick={() => setSearch("Swarmica")}>
+						Swarmica
+					</span>
+				</p>
 			</header>
-			<section className={"flex flex-col gap-4 border border-zinc-200 rounded-lg p-4"}>
+			<section className={"flex flex-col gap-4 border border-zinc-200 rounded-lg bg-white p-4"}>
 				<span className={"text-2xl font-light"}>Locales ({locales?.length})</span>
 				{locales?.length ? (
 					<ul className={"flex flex-wrap gap-4"}>
 						{locales.map((locale: Locale, i: number) => (
 							<li key={i}>
 								<button
-									className={`${activeLocale === locale && "bg-sky-400 text-neutral-50"} rounded uppercase p-2`}
+									className={`${activeLocale === locale ? "bg-sky-400 text-neutral-50 border border-transparent" : "border border-zinc-200"} rounded uppercase p-2`}
 									disabled={loading}
 									onClick={() => setActiveLocale(locale)}
 								>
@@ -132,13 +131,13 @@ function App() {
 					<span className="text-lg">Loading..</span>
 				)}
 			</section>
-			<section className={"flex flex-col gap-4 border border-zinc-200 rounded-lg p-4"}>
+			<section className={"flex flex-col gap-4 border border-zinc-200 rounded-lg bg-white p-4"}>
 				<span className={"text-2xl font-light"}>Categories ({categories?.length})</span>
 				{categories?.length ? (
 					<ul className={"flex flex-wrap gap-4"}>
 						{categories.map((category: Category) => (
 							<li
-								className={`${activeCategoriesId.includes(category.id) && "bg-sky-400 text-neutral-50"} flex items-center border border-zinc-200 rounded-lg cursor-pointer overflow-hidden`}
+								className={`${activeCategoriesId.includes(category.id) ? "bg-sky-400 text-neutral-50 border border-transparent" : "border border-zinc-200"} flex items-center rounded-lg cursor-pointer overflow-hidden`}
 								key={category.id}
 								onClick={() => handleActiveCategoriesId(category.id)}
 							>
@@ -160,19 +159,43 @@ function App() {
 				)}
 			</section>
 			{searchDebounced && (
-				<section className={"flex flex-col gap-4 border border-zinc-200 rounded-lg p-4"}>
+				<section className={"flex flex-col gap-4 border border-zinc-200 rounded-lg bg-white p-4"}>
 					<span className={"text-2xl font-light"}>Articles ({loading ? 0 : articles?.length})</span>
 					{loading ? (
 						<span className="text-lg">Loading..</span>
 					) : articles?.length ? (
-						<ul className={"flex flex-wrap gap-4"}>
-							{articles.map((article: Article, i: number) => (
-								<li key={i}>
-									<a href={article.public_urls[activeLocale]} target={"_blank"} rel={"noreferrer"}>
-										<article className={"bg-sky-400 text-neutral-50 rounded uppercase p-2"}>
-											{article.title[activeLocale]}
-										</article>
-									</a>
+						<ul className={"grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4"}>
+							{articles.map((article: Article) => (
+								<li className={"grid gap-4 border border-zinc-200 rounded-lg p-4"} key={article.id}>
+									<article className={"relative flex flex-col gap-2 max-h-64 overflow-hidden"}>
+										<span
+											className={"text-2xl font-semibold prose max-w-full"}
+											dangerouslySetInnerHTML={{ __html: marked(article.highlight.title) }}
+										></span>
+										<p
+											className={"text-sm prose max-w-full"}
+											dangerouslySetInnerHTML={{ __html: marked(article.highlight.body) }}
+										></p>
+										<span className="absolute bottom-0 h-32 w-full bg-gradient-to-t from-white to-transparent pointer-events-none"></span>
+									</article>
+									{visitedArticlesId.includes(article.id) ? (
+										<a
+											className={"block border border-zinc-200 rounded text-center mt-auto p-2"}
+											href={article.public_urls[activeLocale]}
+											target={"_blank"}
+											rel={"noreferrer"}
+										>
+											Already visited
+										</a>
+									) : (
+										<a
+											className={"block bg-sky-400 text-neutral-50 rounded text-center mt-auto p-2"}
+											href={article.public_urls[activeLocale]}
+											onClick={(e: React.MouseEvent<HTMLAnchorElement, MouseEvent>) => handleLinkClick(e, article.id)}
+										>
+											Read more
+										</a>
+									)}
 								</li>
 							))}
 						</ul>
